@@ -1,10 +1,3 @@
-// api/chat.js
-// Deploy this on Vercel (or Netlify Functions, adapted slightly).
-// It keeps your Anthropic API key on the server — never expose it in
-// frontend JS or the GitHub Pages site itself.
-
-// ---- 1. Facts about Sivaraj, used as the system prompt ----
-// Edit this freely — this is the "knowledge" the chatbot draws on.
 const SYSTEM_PROMPT = `You are the AI assistant embedded on Sivaraj Rajendran's portfolio website (siva1789.github.io). You answer visitor questions about Sivaraj's work, background, and experience, in a warm, concise, professional voice — like a knowledgeable colleague, not a sales pitch.
 
 ABOUT SIVARAJ:
@@ -46,62 +39,162 @@ CONTACT:
 - Location: Bengaluru, Karnataka
 
 RULES:
-- Answer only using the facts above. If asked something you don't have facts for (e.g. availability, rates, personal opinions), say you don't have that detail and suggest they reach out directly via email or WhatsApp.
+- Answer only using the facts above.
+- If asked something you don't have facts for, say you don't have that detail and suggest they reach out directly via email or WhatsApp.
 - Keep answers short — 2-4 sentences unless the visitor asks for detail.
 - Never invent projects, dates, or clients not listed above.
-- If asked something unrelated to Sivaraj's work (general trivia, coding help, etc.), politely redirect to what you can help with: questions about Sivaraj's design work and experience.`;
+- If asked something unrelated to Sivaraj's work, politely redirect to questions about Sivaraj's design work and experience.`;
 
-// ---- 2. The handler ----
 export default async function handler(req, res) {
-  // CORS: restrict to your GitHub Pages origin in production
-  res.setHeader('Access-Control-Allow-Origin', 'https://siva1789.github.io');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  // -----------------------------
+  // CORS
+  // -----------------------------
+  res.setHeader(
+    'Access-Control-Allow-Origin',
+    'https://siva1789.github.io'
+  );
+
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'POST, OPTIONS'
+  );
+
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type'
+  );
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({
+      error: 'Method not allowed'
+    });
+  }
 
   try {
-    const { messages } = req.body;
+
+    // -----------------------------
+    // Check API key
+    // -----------------------------
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+
+    if (!apiKey) {
+      console.error('ANTHROPIC_API_KEY is missing');
+
+      return res.status(500).json({
+        error: 'ANTHROPIC_API_KEY is not configured on Vercel.'
+      });
+    }
+
+    // -----------------------------
+    // Read request body
+    // -----------------------------
+    const { messages } = req.body || {};
 
     if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: 'messages array is required' });
+      return res.status(400).json({
+        error: 'messages array is required'
+      });
     }
 
-    // Basic guardrails: cap history length + message size to control cost/abuse
-    const trimmed = messages.slice(-12).map(m => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: String(m.content || '').slice(0, 2000),
-    }));
+    // -----------------------------
+    // Clean conversation history
+    // -----------------------------
+    const trimmed = messages
+      .slice(-12)
+      .map((m) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: String(m.content || '').slice(0, 2000)
+      }))
+      .filter((m) => m.content.trim().length > 0);
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 500,
-        system: SYSTEM_PROMPT,
-        messages: trimmed,
-      }),
+    if (trimmed.length === 0) {
+      return res.status(400).json({
+        error: 'No valid message was provided'
+      });
+    }
+
+    console.log(
+      'Sending message to Anthropic:',
+      trimmed[trimmed.length - 1].content
+    );
+
+    // -----------------------------
+    // Call Anthropic
+    // -----------------------------
+    const response = await fetch(
+      'https://api.anthropic.com/v1/messages',
+      {
+        method: 'POST',
+
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 500,
+          system: SYSTEM_PROMPT,
+          messages: trimmed
+        })
+      }
+    );
+
+    // -----------------------------
+    // Handle Anthropic error
+    // -----------------------------
+    if (!response.ok) {
+
+      const errorText = await response.text();
+
+      console.error(
+        'Anthropic API failed:',
+        response.status,
+        errorText
+      );
+
+      return res.status(502).json({
+        error: 'Anthropic API error',
+        status: response.status,
+        details: errorText
+      });
+    }
+
+    // -----------------------------
+    // Read successful response
+    // -----------------------------
+    const data = await response.json();
+
+    console.log('Anthropic response received');
+
+    const textBlock = data.content?.find(
+      (block) => block.type === 'text'
+    );
+
+    const reply =
+      textBlock?.text ||
+      "Sorry, I couldn't generate a response just now.";
+
+    return res.status(200).json({
+      reply
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error('Anthropic API error:', errText);
-      return res.status(502).json({ error: 'Upstream API error' });
-    }
-
-    const data = await response.json();
-    const textBlock = data.content?.find(b => b.type === 'text');
-    const reply = textBlock?.text || "Sorry, I couldn't generate a response just now.";
-
-    return res.status(200).json({ reply });
   } catch (err) {
-    console.error('Chat handler error:', err);
-    return res.status(500).json({ error: 'Something went wrong' });
+
+    console.error(
+      'Chat handler error:',
+      err
+    );
+
+    return res.status(500).json({
+      error: 'Something went wrong',
+      details: err.message
+    });
   }
 }
